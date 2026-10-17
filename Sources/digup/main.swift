@@ -540,7 +540,8 @@ func modelSpeed(_ args: Arguments) throws {
     }
     let saved = MeasuredCosts.load(from: folder)
     var speed = saved.speed ?? MeasuredCosts.Speed(embedding: 1, ocr: 1)
-    let compares = !LlamaEmbedder.cpuOnly && LlamaEmbedder.hasGPU && embedderSource() != nil
+    // A server's time is the server's: no processor or GPU here to choose between (`device` stays as it was).
+    let compares = !RemoteEmbedding.isConfigured && !LlamaEmbedder.cpuOnly && LlamaEmbedder.hasGPU && embedderSource() != nil
     let checks = speed.kinds == nil ? 0 : speed.checks ?? 1
     let again = checks < 3 && (speed.doubtful == true || saved.pace.map { $0 < 0.25 } == true)
     if args.flags.contains("--if-needed"), let kinds = speed.kinds, speed.device != nil || !compares, !again {
