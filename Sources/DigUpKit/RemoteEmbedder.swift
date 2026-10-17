@@ -22,8 +22,6 @@ public struct RemoteEmbedding: Codable, Sendable, Equatable {
         case messages
         /// llama-server's prompt objects: `{"prompt_string": "<__media__>", "multimodal_data": [base64]}`.
         case llama
-        /// Text only: images and audio get no vector (they're still found by name and text).
-        case off = "none"
     }
 
     public var url: String
@@ -99,7 +97,7 @@ public struct RemoteEmbedding: Codable, Sendable, Equatable {
         if let model = value("DIGUP_EMBED_MODEL") { config.model = model }
         if let media = value("DIGUP_EMBED_MEDIA") {
             guard let parsed = Media(rawValue: media) else {
-                throw WorkerError.failed("DIGUP_EMBED_MEDIA must be messages, llama or none, not \(media)")
+                throw WorkerError.failed("DIGUP_EMBED_MEDIA must be messages or llama, not \(media)")
             }
             config.media = parsed
         }
@@ -113,8 +111,7 @@ public struct RemoteEmbedding: Codable, Sendable, Equatable {
         do { return try load() != nil } catch { return true }
     }
 
-    /// What the Test button shows: whether the server gives usable vectors for text and, unless `media` is `.off`,
-    /// for a picture.
+    /// What the Test button shows: whether the server gives usable vectors for text, a picture and a sound.
     public struct TestResult: Codable, Sendable, Equatable {
         public var ok: Bool
         public var message: String
@@ -125,27 +122,46 @@ public struct RemoteEmbedding: Codable, Sendable, Equatable {
         }
     }
 
-    /// One text request and one small picture, each waiting `timeout` seconds at most.
+    /// One request for each kind DigUp sends: text, a small picture and a short sound, each waiting `timeout` seconds
+    /// at most.
     public func test(timeout: TimeInterval = 20) -> TestResult {
         let embedder: RemoteEmbedder
         do {
-            embedder = try RemoteEmbedder(self, textOnly: media == .off, timeout: timeout)
+            embedder = try RemoteEmbedder(self, textOnly: false, timeout: timeout)
         } catch {
             return TestResult(ok: false, message: reason(error))
         }
         defer { embedder.close() }
-        guard media != .off else { return TestResult(ok: true, message: "Text works. Pictures and sound are found by name and text only.") }
-        let picture = FileManager.default.temporaryDirectory.appendingPathComponent("digup-test-\(UUID().uuidString).png")
-        defer { try? FileManager.default.removeItem(at: picture) }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("digup-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let picture = folder.appendingPathComponent("test.png")
+        let sound = folder.appendingPathComponent("test.wav")
+        var failed: [String] = []
         do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try Data(base64Encoded: Self.testPicture)!.write(to: picture)
-            if let error = try embedder.embedImages([picture.path], budget: 0).first?.error {
-                return TestResult(ok: false, message: "Text works, but pictures don't: \(error)")
-            }
+            try Self.testSound().write(to: sound)
+            if let error = try embedder.embedImages([picture.path], budget: 0).first?.error { failed.append("pictures: \(error)") }
+            if let error = try embedder.embedAudio([sound.path]).first?.error { failed.append("sound: \(error)") }
         } catch {
-            return TestResult(ok: false, message: "Text works, but pictures don't: \(reason(error))")
+            return TestResult(ok: false, message: reason(error))
         }
-        return TestResult(ok: true, message: "Text and pictures work.")
+        guard failed.isEmpty else {
+            return TestResult(ok: false, message: "Text works, but not " + failed.joined(separator: "; "))
+        }
+        return TestResult(ok: true, message: "Text, pictures and sound work.")
+    }
+
+    /// One second of a 440 Hz tone: 16 kHz, 16-bit mono WAV.
+    static func testSound() -> Data {
+        let rate = 16_000
+        let samples = (0..<rate).map { Int16(8_000 * sin(2 * Double.pi * 440 * Double($0) / Double(rate))) }
+        func le<T: FixedWidthInteger>(_ value: T) -> Data { withUnsafeBytes(of: value.littleEndian) { Data($0) } }
+        var data = Data("RIFF".utf8) + le(UInt32(36 + samples.count * 2)) + Data("WAVEfmt ".utf8)
+        data += le(UInt32(16)) + le(UInt16(1)) + le(UInt16(1)) + le(UInt32(rate)) + le(UInt32(rate * 2))
+        data += le(UInt16(2)) + le(UInt16(16)) + Data("data".utf8) + le(UInt32(samples.count * 2))
+        for sample in samples { data += le(sample) }
+        return data
     }
 
     /// A 32x32 orange PNG.
@@ -223,9 +239,6 @@ public final class RemoteEmbedder: Embedder {
     /// One file's vector, or why it has none (a file the server can't read must not sink its neighbours).
     private func embedMedia(_ path: String, image: Bool) throws -> Embedding {
         guard !textOnly else { throw WorkerError.failed("this embedder was started text-only") }
-        guard config.media != .off else {
-            return Embedding(vector: nil, error: "the embedding server is set to text only")
-        }
         do {
             let data = try Data(contentsOf: URL(fileURLWithPath: path)).base64EncodedString()
             let body: [String: Any]
@@ -236,7 +249,7 @@ public final class RemoteEmbedder: Embedder {
                     ? ["type": "image_url", "image_url": ["url": "data:\(mime);base64,\(data)"]]
                     : ["type": "audio_url", "audio_url": ["url": "data:\(mime);base64,\(data)"]]
                 body = ["messages": [["role": "user", "content": [part]]]]
-            case .llama, .off:
+            case .llama:
                 body = ["input": [["prompt_string": mediaMarker, "multimodal_data": [data]]]]
             }
             guard let vector = try post(body).first else { throw WorkerError.failed("the server sent no vector") }

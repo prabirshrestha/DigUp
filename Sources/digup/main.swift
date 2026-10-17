@@ -55,7 +55,7 @@ let usage = """
     ~/Library/Application Support/DigUp/Models or the Hugging Face cache. DIGUP_WORKER_DIR=worker uses the
     mlx-vlm reference worker instead (evals). An OpenAI-compatible server replaces both when embedder.json in
     DigUp's folder or $DIGUP_EMBED_URL names one ($DIGUP_EMBED_API_KEY, $DIGUP_EMBED_MODEL, $DIGUP_EMBED_MEDIA:
-    messages, llama or none); see docs/remote-embeddings.md.
+    messages or llama); see docs/remote-embeddings.md.
     """
 
 struct CLIError: Error, CustomStringConvertible {

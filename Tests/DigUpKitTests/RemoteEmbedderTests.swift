@@ -20,15 +20,15 @@ import Testing
         #expect(fromFile == RemoteEmbedding(url: "http://spark:8000/v1", apiKey: "k", model: RemoteEmbedding.defaultModel,
                                             media: .llama))
         let overridden = try #require(try RemoteEmbedding.load(file: config, environment: [
-            "DIGUP_EMBED_URL": "http://other/v1", "DIGUP_EMBED_MODEL": "m", "DIGUP_EMBED_MEDIA": "none",
+            "DIGUP_EMBED_URL": "http://other/v1", "DIGUP_EMBED_MODEL": "m", "DIGUP_EMBED_MEDIA": "messages",
         ]))
-        #expect(overridden == RemoteEmbedding(url: "http://other/v1", apiKey: "k", model: "m", media: .off))
+        #expect(overridden == RemoteEmbedding(url: "http://other/v1", apiKey: "k", model: "m", media: .messages))
     }
 
     @Test func brokenFileIsAnError() throws {
         #expect(throws: WorkerError.self) { try RemoteEmbedding.load(file: file("{"), environment: [:]) }
         #expect(throws: WorkerError.self) {
-            try RemoteEmbedding.load(file: file(nil), environment: ["DIGUP_EMBED_URL": "http://x", "DIGUP_EMBED_MEDIA": "video"])
+            try RemoteEmbedding.load(file: file(nil), environment: ["DIGUP_EMBED_URL": "http://x", "DIGUP_EMBED_MEDIA": "none"])
         }
     }
 
