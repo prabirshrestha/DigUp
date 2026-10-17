@@ -32,6 +32,9 @@ let usage = """
                                               see SearchService): for shells that can't link DigUpKit
       digup download-model [--to DIR]         the model files, from the Hugging Face cache or downloaded with
                                               resume, checked (JSON lines: see DownloadModel)
+      digup embedder get|set|test             the embedding server in embedder.json: show it, save the one on
+                                              stdin (no URL: the built-in model), or try it (JSON; see
+                                              EmbedderSettings)
 
     Options:
       --index DIR          index folder (default: DigUp's Application Support folder; see `digup status`)
@@ -728,6 +731,7 @@ do {
     case "worker": exit(workerService(args))
     case "search-service": exit(try searchService(args))
     case "download-model": exit(try downloadModel(args))
+    case "embedder": exit(try embedderSettings(args))
     default:
         print(usage)
         exit(2)

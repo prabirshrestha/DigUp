@@ -53,7 +53,33 @@ public struct RemoteEmbedding: Codable, Sendable, Equatable {
         media = try container.decodeIfPresent(Media.self, forKey: .media) ?? .messages
     }
 
-    public static var file: URL { AppPaths.applicationSupport.appendingPathComponent(fileName) }
+    /// `embedder.json` in DigUp's folder; $DIGUP_EMBEDDER_FILE moves it (dev runs, which mustn't touch the real one).
+    public static var file: URL {
+        if let path = ProcessInfo.processInfo.environment["DIGUP_EMBEDDER_FILE"], !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        return AppPaths.applicationSupport.appendingPathComponent(fileName)
+    }
+
+    /// What the settings screens show: the file alone, without the environment. nil for the built-in model, and for a
+    /// file that doesn't parse (saving over it fixes it).
+    public static func saved(file: URL = file) -> RemoteEmbedding? {
+        try? load(file: file, environment: [:])
+    }
+
+    /// Saves the server for every helper to read, or with nil (or an empty URL) removes the file: the built-in model.
+    public static func save(_ config: RemoteEmbedding?, file: URL = file) throws {
+        guard var config, !config.url.trimmingCharacters(in: .whitespaces).isEmpty else {
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+            return
+        }
+        config.url = config.url.trimmingCharacters(in: .whitespaces)
+        if config.apiKey?.isEmpty == true { config.apiKey = nil }
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(config).write(to: file, options: .atomic)
+    }
 
     /// The configured server, or nil to run the model here. A file that doesn't parse is an error, not a silent
     /// fallback to the local model.
@@ -87,6 +113,44 @@ public struct RemoteEmbedding: Codable, Sendable, Equatable {
         do { return try load() != nil } catch { return true }
     }
 
+    /// What the Test button shows: whether the server gives usable vectors for text and, unless `media` is `.off`,
+    /// for a picture.
+    public struct TestResult: Codable, Sendable, Equatable {
+        public var ok: Bool
+        public var message: String
+
+        public init(ok: Bool, message: String) {
+            self.ok = ok
+            self.message = message
+        }
+    }
+
+    /// One text request and one small picture, each waiting `timeout` seconds at most.
+    public func test(timeout: TimeInterval = 20) -> TestResult {
+        let embedder: RemoteEmbedder
+        do {
+            embedder = try RemoteEmbedder(self, textOnly: media == .off, timeout: timeout)
+        } catch {
+            return TestResult(ok: false, message: reason(error))
+        }
+        defer { embedder.close() }
+        guard media != .off else { return TestResult(ok: true, message: "Text works. Pictures and sound are found by name and text only.") }
+        let picture = FileManager.default.temporaryDirectory.appendingPathComponent("digup-test-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: picture) }
+        do {
+            try Data(base64Encoded: Self.testPicture)!.write(to: picture)
+            if let error = try embedder.embedImages([picture.path], budget: 0).first?.error {
+                return TestResult(ok: false, message: "Text works, but pictures don't: \(error)")
+            }
+        } catch {
+            return TestResult(ok: false, message: "Text works, but pictures don't: \(reason(error))")
+        }
+        return TestResult(ok: true, message: "Text and pictures work.")
+    }
+
+    /// A 32x32 orange PNG.
+    private static let testPicture = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR42mM4UaFBU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAIvioExdDtm1AAAAAElFTkSuQmCC"
+
     /// What this server's vectors are, for index fingerprints: the model, not the host, so moving the server keeps the
     /// index.
     public var info: WorkerInfo {
@@ -103,21 +167,25 @@ public final class RemoteEmbedder: Embedder {
     private let endpoint: URL
     private let textOnly: Bool
     private let session: URLSession
+    /// Where a picture or sound goes in a llama-server prompt: newer servers pick a random marker and name it in
+    /// `GET /props`.
+    private var mediaMarker = "<__media__>"
     private static let textBatch = 32
 
-    public init(_ config: RemoteEmbedding, textOnly: Bool) throws {
+    public init(_ config: RemoteEmbedding, textOnly: Bool, timeout: TimeInterval = 300) throws {
         let base = config.url.hasSuffix("/") ? String(config.url.dropLast()) : config.url
         guard let endpoint = URL(string: base + "/embeddings"), endpoint.scheme?.hasPrefix("http") == true else {
             throw WorkerError.failed("embedding server URL isn't http(s): \(config.url)")
         }
         let started = Date()
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 300
+        configuration.timeoutIntervalForRequest = timeout
         session = URLSession(configuration: configuration)
         self.config = config
         self.endpoint = endpoint
         self.textOnly = textOnly
         info = config.info
+        if config.media == .llama && !textOnly { mediaMarker = Self.mediaMarker(base: base, session: session) ?? mediaMarker }
         // One small request now: a wrong URL, key or model shows up here, not halfway through indexing.
         _ = try embedTexts([Prompts.query("warm up")])
         let seconds = (Date().timeIntervalSince(started) * 100).rounded() / 100
@@ -169,13 +237,25 @@ public final class RemoteEmbedder: Embedder {
                     : ["type": "audio_url", "audio_url": ["url": "data:\(mime);base64,\(data)"]]
                 body = ["messages": [["role": "user", "content": [part]]]]
             case .llama, .off:
-                body = ["input": [["prompt_string": "<__media__>", "multimodal_data": [data]]]]
+                body = ["input": [["prompt_string": mediaMarker, "multimodal_data": [data]]]]
             }
             guard let vector = try post(body).first else { throw WorkerError.failed("the server sent no vector") }
             return Embedding(vector: vector, error: nil)
         } catch {
-            return Embedding(vector: nil, error: String("\(error)".prefix(300)))
+            return Embedding(vector: nil, error: String(reason(error).prefix(300)))
         }
+    }
+
+    /// llama-server's `media_marker`, from `/props` at the server's root (the URL without `/v1`).
+    private static func mediaMarker(base: String, session: URLSession) -> String? {
+        struct Props: Decodable {
+            let media_marker: String?
+        }
+        let root = base.hasSuffix("/v1") ? String(base.dropLast(3)) : base
+        guard let url = URL(string: root + "/props"),
+              case .success(let (data, response)) = send(URLRequest(url: url), on: session),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return (try? JSONDecoder().decode(Props.self, from: data))?.media_marker
     }
 
     private static func mimeType(_ path: String, image: Bool) -> String {
@@ -249,11 +329,19 @@ public final class RemoteEmbedder: Embedder {
             if let data, let response {
                 box.result = .success((data, response))
             } else {
-                box.result = .failure(error ?? WorkerError.failed("no reply from the embedding server"))
+                let url = request.url?.absoluteString ?? ""
+                box.result = .failure(WorkerError.failed(error.map { "can't reach \(url): \($0.localizedDescription)" }
+                                                         ?? "no reply from \(url)"))
             }
             done.signal()
         }.resume()
         done.wait()
         return box.result!
     }
+}
+
+/// An error as the person reads it: a server's own words without the worker prefix.
+private func reason(_ error: Error) -> String {
+    if case WorkerError.failed(let why) = error { return why }
+    return "\(error)"
 }

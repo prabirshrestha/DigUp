@@ -32,6 +32,29 @@ import Testing
         }
     }
 
+    @Test func saveWritesTheFileAndNilRemovesIt() throws {
+        let config = try file(nil)
+        try RemoteEmbedding.save(RemoteEmbedding(url: " http://spark:8080/v1 ", apiKey: "", media: .llama), file: config)
+        #expect(RemoteEmbedding.saved(file: config) == RemoteEmbedding(url: "http://spark:8080/v1", media: .llama))
+        #expect(String(decoding: try Data(contentsOf: config), as: UTF8.self) == """
+            {
+              "media" : "llama",
+              "model" : "google/embeddinggemma-2",
+              "url" : "http://spark:8080/v1"
+            }
+            """)
+        try RemoteEmbedding.save(nil, file: config)
+        #expect(!FileManager.default.fileExists(atPath: config.path))
+        try RemoteEmbedding.save(RemoteEmbedding(url: "  "), file: config)
+        #expect(!FileManager.default.fileExists(atPath: config.path))
+    }
+
+    @Test func testReportsAnUnreachableServer() {
+        let result = RemoteEmbedding(url: "http://127.0.0.1:9/v1").test(timeout: 5)
+        #expect(!result.ok)
+        #expect(result.message.hasPrefix("can't reach http://127.0.0.1:9/v1/embeddings"))
+    }
+
     @Test func sourceIgnoresTheHost() {
         #expect(RemoteEmbedding(url: "http://a/v1").info.vectorSource == RemoteEmbedding(url: "http://b/v1").info.vectorSource)
     }
