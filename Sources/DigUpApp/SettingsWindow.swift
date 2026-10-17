@@ -4,13 +4,14 @@ import Observation
 import SwiftUI
 
 enum SettingsTab: String, CaseIterable {
-    case general, folders, code, storage
+    case general, folders, code, model, storage
 
     var title: String {
         switch self {
         case .general: "General"
         case .folders: "Folders"
         case .code: "Code"
+        case .model: "Model"
         case .storage: "Storage"
         }
     }
@@ -20,6 +21,7 @@ enum SettingsTab: String, CaseIterable {
         case .general: "gearshape"
         case .folders: "folder"
         case .code: "chevron.left.forwardslash.chevron.right"
+        case .model: "cpu"
         case .storage: "internaldrive"
         }
     }
@@ -69,6 +71,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let window = self.window ?? makeWindow()
         tabs?.selectedTabViewItemIndex = SettingsTab.allCases.firstIndex(of: tab) ?? 0
         state.tab = tab
+        state.embedder.revert()
         Task { await state.refresh() }
         app.present(window)
     }
@@ -127,6 +130,8 @@ final class SettingsState {
     var launchAtLogin = false
     var loginProblem: String?
     var checksForUpdates = false
+    /// Model: the model on this Mac or an embedding server.
+    let embedder: EmbedderForm
     @ObservationIgnored let app: AppController
     @ObservationIgnored var selectTab: (SettingsTab) -> Void = { _ in }
     @ObservationIgnored var addFolders: () -> Void = {}
@@ -134,6 +139,7 @@ final class SettingsState {
 
     init(app: AppController) {
         self.app = app
+        embedder = EmbedderForm { [weak app] in app?.setEmbedder($0) }
     }
 
     @ObservationIgnored private var lastRefresh = Date.distantPast
@@ -182,6 +188,7 @@ private struct SettingsPane: View {
                 case .general: GeneralSettings(state: state)
                 case .folders: FolderSettings(state: state)
                 case .code: CodeSettings(state: state)
+                case .model: ModelSettings(state: state)
                 case .storage: StorageSettings(state: state)
                 }
             }
@@ -525,51 +532,102 @@ private struct FolderStatusRow: View {
     }
 }
 
-private struct StorageSettings: View {
+/// Where the model runs: on this Mac (downloaded once) or on an embedding server.
+private struct ModelSettings: View {
     let state: SettingsState
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("EmbeddingGemma 2") {
-                    Text("Google · Apache 2.0 · 865 MB")
-                }
-                LabeledContent("Status") {
-                    HStack(spacing: 8) {
-                        Text(state.model.download.isReady ? "Downloaded" : state.model.download.progressText)
-                        switch state.model.download.phase {
-                        case .needed, .failed:
-                            Button("Download") { state.model.download.start() }.controlSize(.small)
-                            Button("Use Files…") { state.model.download.chooseFiles(for: NSApp.keyWindow) }
-                                .controlSize(.small)
-                        default:
-                            EmptyView()
-                        }
-                    }
-                }
-                LabeledContent("Location") {
-                    PathButton(url: state.model.settings.modelsDirectory)
+                EmbedderChoicePicker(form: state.embedder)
+                if state.embedder.draft.choice == .server {
+                    EmbedderServerFields(form: state.embedder)
+                } else {
+                    builtInModel
                 }
             } header: {
                 Text("Model")
             } footer: {
-                if !state.model.download.isReady {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text("If your network blocks Hugging Face, download the two files on another network and "
-                             + "click Use Files… to choose them. DigUp checks them before it uses them.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer()
-                        Button("Copy Links") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(ModelDownload.links, forType: .string)
+                VStack(alignment: .leading, spacing: 8) {
+                    if state.embedder.hasChanges || state.embedder.problem != nil {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(state.embedder.problem ?? saveNote)
+                                .font(.system(size: 11))
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .foregroundStyle(state.embedder.problem == nil ? AnyShapeStyle(.secondary)
+                                                                               : AnyShapeStyle(.red))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer()
+                            Button("Revert") { state.embedder.revert() }
+                            Button("Save") { state.embedder.save() }
+                                .keyboardShortcut(.defaultAction)
+                                .disabled(!state.embedder.canSave)
                         }
-                        .controlSize(.small)
-                        .help("Copies the addresses of the two files")
+                    }
+                    if state.embedder.draft.choice == .builtIn, !state.model.download.isReady {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("If your network blocks Hugging Face, download the two files on another network and "
+                                 + "click Use Files… to choose them. DigUp checks them before it uses them.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer()
+                            Button("Copy Links") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(ModelDownload.links, forType: .string)
+                            }
+                            .controlSize(.small)
+                            .help("Copies the addresses of the two files")
+                        }
                     }
                 }
             }
+        }
+        .formStyle(.grouped)
+        .scrollDisabled(true)
+    }
+
+    /// The model this Mac runs: whether it's downloaded, and where.
+    @ViewBuilder private var builtInModel: some View {
+        LabeledContent("EmbeddingGemma 2") {
+            Text("Google · Apache 2.0 · 865 MB")
+        }
+        LabeledContent("Status") {
+            HStack(spacing: 8) {
+                if state.embedder.saved != nil {
+                    // A server is in use, so nothing downloaded; switching back starts the download.
+                    Text(ModelFiles.missing(in: state.model.settings.modelsDirectory).isEmpty
+                         ? "Downloaded" : "Downloads when you save")
+                } else {
+                    Text(state.model.download.isReady ? "Downloaded" : state.model.download.progressText)
+                }
+                switch state.embedder.saved == nil ? state.model.download.phase : .ready {
+                case .needed, .failed:
+                    Button("Download") { state.model.download.start() }.controlSize(.small)
+                    Button("Use Files…") { state.model.download.chooseFiles(for: NSApp.keyWindow) }
+                        .controlSize(.small)
+                default:
+                    EmptyView()
+                }
+            }
+        }
+        LabeledContent("Location") {
+            PathButton(url: state.model.settings.modelsDirectory)
+        }
+    }
+
+    private var saveNote: String {
+        "DigUp switches when you save. A move between this Mac and a server, or to another model, indexes every "
+            + "file again."
+    }
+}
+
+private struct StorageSettings: View {
+    let state: SettingsState
+
+    var body: some View {
+        Form {
             Section("Index") {
                 LabeledContent("Size on disk", value: bytes(state.indexSize))
                 if state.model.hasCode {
@@ -580,15 +638,21 @@ private struct StorageSettings: View {
                 }
             }
             Section("Privacy") {
-                Text("DigUp reads the folders you choose and keeps what it learns in its index, on this Mac. "
-                     + "It goes online only to download its model, once, and to check for updates (General), "
-                     + "which sends nothing about your files.")
+                Text(state.embedder.saved == nil
+                     ? "DigUp reads the folders you choose and keeps what it learns in its index, on this Mac. "
+                        + "It goes online only to download its model, once, and to check for updates (General), "
+                        + "which sends nothing about your files."
+                     : "DigUp reads the folders you choose and keeps what it learns in its index, on this Mac. "
+                        + "To index them it sends their text, pictures and sound to the embedding server (Model), "
+                        + "and your searches too. It also checks for updates (General), which sends nothing about "
+                        + "your files.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section {
                 Text("DigUp \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · "
-                     + "EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT).")
+                     + (state.embedder.saved.map { "Embeddings from \($0.model) on your server." }
+                        ?? "EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT)."))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }

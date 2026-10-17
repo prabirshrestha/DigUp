@@ -6,7 +6,8 @@ import SwiftUI
 /// First launch, in four steps: what DigUp does, which folders to search (with how long the first pass takes), the
 /// hotkey (try it), and done; a fifth, code search, when there are folders with code on the Mac (it stays off unless
 /// you turn it on there). The model downloads from Get Started on, shown at the bottom of every later step, and
-/// the chosen folders start indexing as soon as you continue past them.
+/// the chosen folders start indexing as soon as you continue past them. Choosing an embedding server on the first step
+/// instead adds a step for it, and nothing downloads.
 final class OnboardingController: NSObject, NSWindowDelegate {
     let state: OnboardingState
     private unowned let app: AppController
@@ -60,7 +61,7 @@ final class OnboardingController: NSObject, NSWindowDelegate {
 @Observable
 final class OnboardingState {
     enum Step: Int, CaseIterable {
-        case welcome, folders, code, shortcut, ready
+        case welcome, server, folders, code, shortcut, ready
     }
 
     private(set) var step = Step.welcome
@@ -72,6 +73,8 @@ final class OnboardingState {
     var searchCode = false {
         didSet { if searchCode { codeFolders.startEstimates() } }
     }
+    /// The model on this Mac (the default), or an embedding server: saved on Get Started, or on the server's step.
+    let embedder: EmbedderForm
     /// You pressed the hotkey on the shortcut step.
     private(set) var hotkeyWorked = false
     var launchAtLogin: Bool
@@ -104,14 +107,17 @@ final class OnboardingState {
         launchAtLogin = app.launchesAtLogin || app.suggestsLaunchAtLogin
         indexOnBattery = settings.indexOnBattery
         skippedTypesText = settings.excludedTypes.joined(separator: ", ")
+        embedder = EmbedderForm { [weak app] in app?.setEmbedder($0) }
     }
 
     var model: AppModel { app.model }
     var download: ModelDownload { app.download }
 
-    /// The steps this Mac gets: code search's only when there's code to offer.
+    /// The steps this Mac gets: the server's only when one is chosen, code search's only when there's code to offer.
     var steps: [Step] {
-        Step.allCases.filter { $0 != .code || !codeFolders.rows.isEmpty }
+        Step.allCases.filter {
+            ($0 != .server || embedder.draft.choice == .server) && ($0 != .code || !codeFolders.rows.isEmpty)
+        }
     }
 
     /// The folders it offers: the usual home folders that exist, or `-onboardingLocations a:b:c` (tests point it at
@@ -135,8 +141,15 @@ final class OnboardingState {
 
     func next() {
         switch step {
+        case .welcome where embedder.draft.choice == .server:
+            go(to: .server)
         case .welcome:
+            if embedder.saved != nil { embedder.save() }   // back to the model on this Mac
             download.start()   // the go-ahead for the one download
+            go(to: .folders)
+        case .server:
+            if embedder.hasChanges { embedder.save() }
+            guard embedder.problem == nil else { return }
             go(to: .folders)
         case .folders:
             // Indexing starts now (file names first; meaning once the model is in), while you set up the rest.
@@ -196,6 +209,11 @@ final class OnboardingState {
         }
     }
 
+    /// The server's step continues once its Test passed, or with the server saved before (back, then on again).
+    var serverReady: Bool {
+        embedder.passed || !embedder.hasChanges && embedder.saved != nil
+    }
+
     /// The step has what it needs to be drawn (debug snapshots wait for this).
     var isLoaded: Bool {
         switch step {
@@ -223,7 +241,8 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             Group {
                 switch state.step {
-                case .welcome: WelcomeStep()
+                case .welcome: WelcomeStep(embedder: state.embedder)
+                case .server: ServerStep(embedder: state.embedder)
                 case .folders: FoldersStep(state: state)
                 case .code: CodeStep(state: state)
                 case .shortcut: ShortcutStep(state: state)
@@ -249,10 +268,15 @@ struct OnboardingView: View {
     private var footer: some View {
         HStack(spacing: 14) {
             StepDots(current: state.steps.firstIndex(of: state.step) ?? 0, count: state.steps.count)
-            if state.step != .welcome {
-                DownloadStatus(download: state.download)
+            if state.step != .welcome, state.step != .server {
+                DownloadStatus(download: state.download, server: state.embedder.saved != nil)
             }
             Spacer(minLength: 8)
+            if state.step == .server, !state.serverReady {
+                Text("Test the server to continue")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
             if state.step == .folders || state.step == .code && state.searchCode {
                 Text(state.step == .code ? codeSummary : foldersSummary)
                     .font(.system(size: 12))
@@ -264,7 +288,8 @@ struct OnboardingView: View {
             }
             Button(continueTitle) { state.next() }
                 .keyboardShortcut(.defaultAction)
-                .disabled(state.step == .folders && state.folders.roots.isEmpty)
+                .disabled(state.step == .folders && state.folders.roots.isEmpty
+                          || state.step == .server && !state.serverReady)
         }
         .controlSize(.large)
         .padding(.horizontal, 20)
@@ -274,6 +299,7 @@ struct OnboardingView: View {
     private var continueTitle: String {
         switch state.step {
         case .welcome: "Get Started"
+        case .server: "Continue"
         case .folders: "Continue"
         case .code: "Continue"
         case .shortcut: "Continue"
@@ -316,13 +342,15 @@ private struct StepDots: View {
 /// The model download, small: "Downloading the model · 42% · about 1 min left", then "Model ready".
 struct DownloadStatus: View {
     let download: ModelDownload
+    /// Embeddings come from a server: there's no model to download.
+    var server = false
 
     var body: some View {
         HStack(spacing: 7) {
             switch download.phase {
             case .ready:
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text("Model ready")
+                Text(server ? "Embedding server set" : "Model ready")
             case .failed(let message):
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Text(message).lineLimit(1)
@@ -348,6 +376,8 @@ struct DownloadStatus: View {
 }
 
 private struct WelcomeStep: View {
+    let embedder: EmbedderForm
+
     var body: some View {
         VStack(spacing: 0) {
             Image(nsImage: NSApp.applicationIconImage)
@@ -369,23 +399,52 @@ private struct WelcomeStep: View {
                 Feature(symbol: "waveform", title: "Moments inside audio and video",
                         example: "“where they talk about sleep”, “the part with the drums”")
             }
-            .padding(.top, 30)
+            .padding(.top, 26)
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "lock.shield")
                     .font(.system(size: 18))
                     .foregroundStyle(.secondary)
                     .frame(width: 30)
-                Text("Everything is indexed and searched on this Mac. DigUp downloads its AI model (865 MB) once; "
-                     + "after that it works offline, and nothing you index ever leaves your Mac.")
+                Text(embedder.draft.choice == .builtIn
+                     ? "Everything is indexed and searched on this Mac. DigUp downloads its AI model (865 MB) once; "
+                        + "after that it works offline, and nothing you index ever leaves your Mac."
+                     : "Your files' text, pictures and sound go to your embedding server to be indexed, and your "
+                        + "searches too. The index stays on this Mac. Use only a server you trust.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.top, 26)
+            .padding(.top, 22)
             .frame(maxWidth: 470, alignment: .leading)
+            EmbedderChoicePicker(form: embedder)
+                .labelsHidden()
+                .font(.system(size: 12))
+                .padding(.top, 14)
+                .frame(maxWidth: 470, alignment: .leading)
         }
         .frame(maxWidth: .infinity)
-        .padding(.bottom, 40)
+        .padding(.bottom, 24)
+    }
+}
+
+/// The embedding server, when chosen on the welcome step instead of the model on this Mac.
+private struct ServerStep: View {
+    let embedder: EmbedderForm
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            StepTitle(title: "Your embedding server",
+                      subtitle: "DigUp sends its embedding work to a server with an OpenAI-compatible /embeddings "
+                          + "endpoint (vLLM, llama-server…) and downloads no model. Test it to continue. "
+                          + "You can change this anytime in Settings → Model.")
+            Form {
+                EmbedderServerFields(form: embedder)
+            }
+            .formStyle(.columns)
+            .frame(maxWidth: 500)
+            .padding(.top, 14)
+            Spacer(minLength: 0)
+        }
     }
 }
 

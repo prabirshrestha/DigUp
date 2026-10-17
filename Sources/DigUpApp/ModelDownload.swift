@@ -14,9 +14,10 @@ import Observation
 /// - The folder is excluded from Time Machine: the files can always be downloaded again.
 ///
 /// This is the app's only network use. It starts when onboarding's Get Started is clicked, or at launch when a set-up
-/// app finds its model missing (an update that brings a new model). A file that's already in the Hugging Face cache
-/// (`hf download`, llama.cpp users) is copied from there instead (an APFS clone: no time, no space), and checked the same.
-/// So are files chosen by hand (`use`), for networks that block Hugging Face.
+/// app finds its model missing (an update that brings a new model); never with an embedding server set
+/// (`RemoteEmbedding`). A file that's already in the Hugging Face cache (`hf download`, llama.cpp users) is copied
+/// from there instead (an APFS clone: no time, no space), and checked the same. So are files chosen by hand (`use`),
+/// for networks that block Hugging Face.
 @Observable
 final class ModelDownload {
     enum Phase: Equatable {
@@ -94,7 +95,28 @@ final class ModelDownload {
         next()
     }
 
+    /// The embedding server changed (`RemoteEmbedding`). With one, nothing downloads: what was downloading stops,
+    /// its `.partial` kept for later. Without, a missing model downloads, as at launch.
+    func embedderChanged() {
+        if RemoteEmbedding.isConfigured {
+            fetcher?.cancel()
+            fetcher = nil
+            attempt += 1   // the stopped fetcher's callbacks are ignored
+            retryWork?.cancel()
+            phase = .ready
+        } else if !ModelFiles.missing(in: folder).isEmpty {
+            if phase == .ready { phase = .needed }
+            received = bytesOnDisk()
+            start()
+        }
+    }
+
     private func next() {
+        // A server was set while this waited (a retry, a check): there's nothing to download.
+        guard !RemoteEmbedding.isConfigured else {
+            phase = .ready
+            return
+        }
         guard let file = ModelFiles.missing(in: folder).first else {
             phase = .ready
             received = total

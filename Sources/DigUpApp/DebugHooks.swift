@@ -1,4 +1,5 @@
 import AppKit
+import DigUpKit
 import Quartz
 import ServiceManagement
 import SwiftUI
@@ -41,7 +42,7 @@ import SwiftUI
 ///                             -debugMenuViewAfter seconds
 ///     -debugReshow N          after the query's final results, hide and show the panel N times (logs show times)
 ///     -debugWindow PAGE       open a window instead of the panel and snapshot it: search (with -debugQuery),
-///                             settings:general|folders|code|storage, settings:add (Folders with Add Folders open),
+///                             settings:general|folders|code|model|storage, settings:add (Folders with Add Folders open),
 ///                             settings:addcode (Code with its folders' sheet open),
 ///                             onboarding:welcome|folders|code|shortcut|ready
 ///                             (-debugCloseWindow YES closes it afterwards, to measure what closing gives back;
@@ -51,6 +52,11 @@ import SwiftUI
 ///                             `;`-separated: open:NAME (show a folder's subfolders), click:NAME (a folder's
 ///                             checkbox) or click:NAME/SUB (a subfolder's), add:PATH and skip:PATH (as picked in the
 ///                             open panel), unskip:PATH, types:heic,txt. NAME is the end of a listed folder's path.
+///     -debugEmbedder "server;url:http://127.0.0.1:8089/v1;media:llama;test;save"   before the snapshot, act on the
+///                             embedding server form of Settings → Model or onboarding (`;`-separated: server,
+///                             local, url:X, key:X, model:X, media:messages|llama, test (waits for its result),
+///                             save, continue (onboarding's Continue), search:TEXT (a meaning search, as the panel
+///                             makes it, logging the top hits)), then log the form
 ///     -debugAdd YES           after the snapshot, press Add Folders' Add (or the code sheet's) and log what it applied
 ///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
 ///     -debugUpdateCheck YES   check for updates in the background a second after launch, as the daily check does
@@ -305,6 +311,7 @@ enum DebugHooks {
             let draw: (URL) throws -> Void
             let close: () -> Void
             var choices: () -> FolderChoices? = { nil }
+            var embedder: () -> EmbedderForm? = { nil }
             switch parts[0] {
             case "settings" where parts.count > 1 && parts[1] == "addcode":
                 app.showSettings(.code)
@@ -328,6 +335,7 @@ enum DebugHooks {
                 loaded = { app.settingsWindow.state.isLoaded }
                 draw = { try app.settingsWindow.snapshot(to: $0) }
                 close = {}
+                embedder = { app.settingsWindow.state.embedder }
             case "onboarding":
                 app.showOnboarding()
                 let onboarding = app.onboarding!
@@ -346,6 +354,7 @@ enum DebugHooks {
                 }
                 loaded = { onboarding.state.isLoaded }
                 draw = { try onboarding.snapshot(to: $0) }
+                embedder = { onboarding.state.embedder }
                 close = { onboarding.close() }
             default:
                 app.showSearchWindow(query: defaults.string(forKey: "debugQuery") ?? "")
@@ -362,28 +371,31 @@ enum DebugHooks {
             waitUntil(loaded, deadline: Date().addingTimeInterval(30)) {
                 log("window: \(page) loaded in \(ms(since: started)) (after a 0.5 s launch delay)")
                 if let list = choices() { act(on: list) }
-                waitUntil({ choices()?.estimatesDone ?? true }, deadline: Date().addingTimeInterval(30)) {
-                    whenPicturesSettle {
-                        save(page, draw, to: snapshotPath())
-                        if let list = choices() { log("choices: \(describe(list))") }
-                        if defaults.bool(forKey: "debugAdd"), app.settingsWindow.addSheet.isOpen {
-                            app.settingsWindow.addSheet.add()
-                            let settings = app.model.settings
-                            log("debug: added; folders \(settings.roots.map { tildePath($0.path) }) · skipping "
-                                + "\(settings.excludedFolders.map { tildePath($0.path) })")
-                        }
-                        if defaults.bool(forKey: "debugAdd"), app.settingsWindow.codeSheet.isOpen {
-                            app.settingsWindow.codeSheet.add()
-                            let settings = app.model.settings
-                            log("debug: added; code folders \(settings.codeRoots.map { tildePath($0.path) }) · "
-                                + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
-                        }
-                        press(keys, app, describe: { windowState(app) }) {
-                            if defaults.bool(forKey: "debugCloseWindow") {
-                                close()
-                                log("window: closed")
+                let actions = defaults.string(forKey: "debugEmbedder")?.split(separator: ";").map(String.init) ?? []
+                act(on: embedder(), actions, app) {
+                    waitUntil({ choices()?.estimatesDone ?? true }, deadline: Date().addingTimeInterval(30)) {
+                        whenPicturesSettle {
+                            save(page, draw, to: snapshotPath())
+                            if let list = choices() { log("choices: \(describe(list))") }
+                            if defaults.bool(forKey: "debugAdd"), app.settingsWindow.addSheet.isOpen {
+                                app.settingsWindow.addSheet.add()
+                                let settings = app.model.settings
+                                log("debug: added; folders \(settings.roots.map { tildePath($0.path) }) · skipping "
+                                    + "\(settings.excludedFolders.map { tildePath($0.path) })")
                             }
-                            if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                            if defaults.bool(forKey: "debugAdd"), app.settingsWindow.codeSheet.isOpen {
+                                app.settingsWindow.codeSheet.add()
+                                let settings = app.model.settings
+                                log("debug: added; code folders \(settings.codeRoots.map { tildePath($0.path) }) · "
+                                    + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
+                            }
+                            press(keys, app, describe: { windowState(app) }) {
+                                if defaults.bool(forKey: "debugCloseWindow") {
+                                    close()
+                                    log("window: closed")
+                                }
+                                if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                            }
                         }
                     }
                 }
@@ -518,6 +530,55 @@ enum DebugHooks {
                 if UserDefaults.standard.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
             }
         }
+    }
+
+    /// `-debugEmbedder`: one action after another on the embedding server form, then what it holds.
+    private static func act(on form: EmbedderForm?, _ actions: [String], _ app: AppController,
+                            then done: @escaping () -> Void) {
+        guard let form, let action = actions.first else {
+            if let form, UserDefaults.standard.string(forKey: "debugEmbedder") != nil {
+                log("embedder form: \(form.draft.choice) \(form.draft.server.url) media \(form.draft.server.media.rawValue)"
+                    + " · test \(form.test) · saved \(form.saved.map { "\($0.url) \($0.media.rawValue)" } ?? "nil")"
+                    + " · changes \(form.hasChanges) · file \(RemoteEmbedding.file.path)"
+                    + " · model \(app.download.phase)" + (form.problem.map { " · problem \($0)" } ?? ""))
+            }
+            return done()
+        }
+        let rest = Array(actions.dropFirst())
+        let (name, value) = action.firstIndex(of: ":").map {
+            (String(action[..<$0]), String(action[action.index(after: $0)...]))
+        } ?? (action, "")
+        log("debug: embedder \(action)")
+        switch name {
+        case "server": form.draft.choice = .server
+        case "local": form.draft.choice = .builtIn
+        case "url": form.draft.url = value
+        case "key": form.draft.apiKey = value
+        case "model": form.draft.model = value
+        case "media": form.draft.media = RemoteEmbedding.Media(rawValue: value) ?? .messages
+        case "save": form.save()
+        case "continue": app.onboarding?.state.next()
+        case "search":
+            app.engine.prewarm()   // the vectors load as when the panel opens
+            Task {
+                let vector = await app.engine.embedQuery(value)
+                let hits = await app.engine.search(value, vector: vector, prefixLast: false, limit: 3)
+                log("debug: search \"\(value)\": vector from \(vector?.source ?? "nothing") · "
+                    + hits.map { "\(($0.path as NSString).lastPathComponent) cos \($0.cosine.map { String(format: "%.3f", $0) } ?? "-")" }
+                        .joined(separator: ", "))
+                act(on: form, rest, app, then: done)
+            }
+            return
+        case "test":
+            form.runTest()
+            return waitUntil({ form.test != .testing }, deadline: Date().addingTimeInterval(60)) {
+                log("debug: embedder test: \(form.test)")
+                act(on: form, rest, app, then: done)
+            }
+        default: log("debug: embedder: unknown action \(action)")
+        }
+        // A moment for the view to follow, as after a click.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { act(on: form, rest, app, then: done) }
     }
 
     private static func waitUntil(_ condition: @escaping () -> Bool, deadline: Date, then body: @escaping () -> Void) {

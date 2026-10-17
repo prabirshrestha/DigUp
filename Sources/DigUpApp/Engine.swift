@@ -297,6 +297,26 @@ nonisolated final class Engine: @unchecked Sendable {
         indexQueue.async { [self] in requestSync() }
     }
 
+    /// The embedding server changed (`RemoteEmbedding`; none: the model here). The query encoder stops, so the next
+    /// query starts one with the new setting, and the indexing helper restarts with it (it embeds everything again
+    /// when its vectors would come from another model).
+    func embedderChanged() {
+        update { $0.waitingForModel = false }   // the new helper says so again if it has to wait
+        encoderQueue.async { [self] in
+            stopEncoder()
+            encoderFailed = false
+        }
+        searchQueue.async { [self] in warnedAboutSource = false }
+        indexQueue.async { [self] in
+            if helper != nil {
+                restartHelper = true
+                stopHelper()
+            } else {
+                startHelper()
+            }
+        }
+    }
+
     /// A drive was connected or ejected: a missing folder may be back (or gone).
     func volumesChanged() {
         watchQueue.async { [self] in

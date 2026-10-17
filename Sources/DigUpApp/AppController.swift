@@ -229,6 +229,23 @@ final class AppController {
         settingsWindow.addCodeFolders()
     }
 
+    // MARK: Embedding server
+
+    /// Embeddings from this server from now on, or with nil from the model on this Mac. The helpers follow without a
+    /// relaunch, and the model downloads only when it's needed. Nil when saved, else why it couldn't be.
+    func setEmbedder(_ config: RemoteEmbedding?) -> String? {
+        do {
+            try RemoteEmbedding.save(config)
+        } catch {
+            log("embedder: can't save \(RemoteEmbedding.file.path): \(error)")
+            return "Can't save the setting: \(error.localizedDescription)"
+        }
+        log("embedder: " + (config.map { "\($0.url) (\($0.model), media \($0.media.rawValue))" } ?? "the model on this Mac"))
+        download.embedderChanged()
+        engine.embedderChanged()
+        return nil
+    }
+
     // MARK: Hotkey
 
     /// Nil when `combo` is now the hotkey, else why it can't be.
