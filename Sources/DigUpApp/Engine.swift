@@ -988,7 +988,7 @@ nonisolated final class Engine: @unchecked Sendable {
         guard !encoderFailed else { return nil }
         let python = try? WorkerConfig.fromEnvironment()
         // Still downloading: no meaning search yet, which isn't a failure.
-        guard python != nil || FileManager.default.fileExists(
+        guard python != nil || RemoteEmbedding.isConfigured || FileManager.default.fileExists(
             atPath: modelsDirectory.appendingPathComponent(ModelFiles.text.name).path) else { return nil }
         update { $0.encoder = .starting }
         let started = Date()

@@ -50,7 +50,9 @@ let usage = """
 
     The model: EmbeddingGemma 2 on llama.cpp, from $DIGUP_MODELS (only there, when set), else
     ~/Library/Application Support/DigUp/Models or the Hugging Face cache. DIGUP_WORKER_DIR=worker uses the
-    mlx-vlm reference worker instead (evals).
+    mlx-vlm reference worker instead (evals). An OpenAI-compatible server replaces both when embedder.json in
+    DigUp's folder or $DIGUP_EMBED_URL names one ($DIGUP_EMBED_API_KEY, $DIGUP_EMBED_MODEL, $DIGUP_EMBED_MEDIA:
+    messages, llama or none); see docs/remote-embeddings.md.
     """
 
 struct CLIError: Error, CustomStringConvertible {
@@ -194,8 +196,10 @@ func skippedLine(_ skipped: [String: Int]) -> String {
 
 // MARK: Commands
 
-/// The embedding runtime: llama.cpp in this process, or the worker in $DIGUP_WORKER_DIR (the mlx-vlm reference).
+/// The embedding runtime: an OpenAI-compatible server when one is set (`RemoteEmbedding`), else llama.cpp in this
+/// process, or the worker in $DIGUP_WORKER_DIR (the mlx-vlm reference).
 func makeEmbedder(textOnly: Bool, log: URL, qos: QualityOfService = .default) throws -> any Embedder {
+    if let remote = try RemoteEmbedding.load() { return try RemoteEmbedder(remote, textOnly: textOnly) }
     if var config = try WorkerConfig.fromEnvironment() {
         config.log = log
         config.qos = qos
@@ -204,9 +208,10 @@ func makeEmbedder(textOnly: Bool, log: URL, qos: QualityOfService = .default) th
     return try LlamaEmbedder(models: try LlamaModels.locate(), textOnly: textOnly, log: log)
 }
 
-/// `makeEmbedder`'s vector source when it's known without starting it: llama.cpp's always is.
+/// `makeEmbedder`'s vector source when it's known without starting it: a server's and llama.cpp's always are.
 func embedderSource() -> String? {
-    ProcessInfo.processInfo.environment["DIGUP_WORKER_DIR"] == nil ? LlamaEmbedder.modelInfo.vectorSource : nil
+    if let remote = try? RemoteEmbedding.load() { return remote.info.vectorSource }
+    return ProcessInfo.processInfo.environment["DIGUP_WORKER_DIR"] == nil ? LlamaEmbedder.modelInfo.vectorSource : nil
 }
 
 func estimate(_ args: Arguments) throws {
@@ -448,7 +453,7 @@ func indexService(_ args: Arguments) throws -> Int32 {
                                                                         roots: codeRoots),
                                folder: args.indexFolder,
                                model: model,
-                               modelReady: { embedderSource() == nil || LlamaModels.complete },
+                               modelReady: { RemoteEmbedding.isConfigured || embedderSource() == nil || LlamaModels.complete },
                                backfill: args.flags.contains("--backfill"),
                                newFilesLimit: args.values["--new-limit"].flatMap(Int.init) ?? 50,
                                linger: args.values["--linger"].flatMap(Double.init) ?? 60)

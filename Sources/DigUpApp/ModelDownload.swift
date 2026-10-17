@@ -49,7 +49,8 @@ final class ModelDownload {
 
     init(folder: URL) {
         self.folder = folder
-        phase = ModelFiles.missing(in: folder).isEmpty ? .ready : .needed
+        // With an embedding server set (`RemoteEmbedding`), nothing runs here: no model to download.
+        phase = RemoteEmbedding.isConfigured || ModelFiles.missing(in: folder).isEmpty ? .ready : .needed
         received = bytesOnDisk()
     }
 

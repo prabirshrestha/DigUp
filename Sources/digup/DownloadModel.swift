@@ -15,6 +15,11 @@ import Foundation
 ///   {"event":"done","folder":…} | {"event":"error","message":…}             the end (exit 0 | 1)
 func downloadModel(_ args: Arguments) throws -> Int32 {
     let folder = args.values["--to"].map(Arguments.folderURL) ?? ModelFiles.installed
+    // With an embedding server set (`RemoteEmbedding`), nothing runs here: no model to download.
+    if RemoteEmbedding.isConfigured {
+        emit(["event": "done", "folder": folder.path])
+        return 0
+    }
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     let missing = ModelFiles.missing(in: folder)
     var done = ModelFiles.totalBytes - missing.reduce(0) { $0 + $1.bytes }
