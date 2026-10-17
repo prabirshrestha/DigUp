@@ -1,7 +1,8 @@
 // DigUp's setup window: what to search and the shortcut, with the model downloading in the background from the moment
 // it opens (the shell starts that), as the Mac app's onboarding does. Folders show what's in them and how long their
 // first pass takes (`digup estimate`; the times once the helper has timed this computer with the model), and open to
-// their subfolders. Indexing starts as the folders step is left; the last step shows it going (the download, then the
+// their subfolders. The first step also asks where the AI model runs: here (the download) or on an embedding server
+// (embedder.js), whose fields are the next step; the choice is saved on Continue, and a server skips the download. Indexing starts as the folders step is left; the last step shows it going (the download, then the
 // files, with the time left) until Done opens the window. Choose Folders… later is the folders step alone, with Save.
 // `?code`: the folders step for code search (Settings → Code → Add Folders…, as the Mac app's code folder list): folders
 // with code, each with the time its code takes to read and its index's size, open to their repositories.
@@ -21,6 +22,7 @@ let page = 0;
 let firstTime = true;
 let info = { offered: [], chosen: [], skipped: [], hotkey: "", model: { state: "checking" }, state: {}, auto: false };
 const codeMode = new URLSearchParams(location.search).has("code");
+let embedder = null;   // where the AI model runs (embedder.js): a first launch's first step, and "server" after it
 
 // MARK: Paths
 // The helper reports folders with forward slashes; on Windows the shell gives them with backslashes, and case doesn't
@@ -364,15 +366,21 @@ function render() {
   $("back").hidden = firstTime ? page === 0 || page === PAGES.length - 1 : false;
   $("back").textContent = firstTime ? "Back" : "Cancel";
   $("next").textContent = !firstTime ? "Save" : page === PAGES.length - 1 ? "Done" : "Continue";
-  $("next").disabled = page === 1 && !selection.folders().length;
-  $("model").hidden = codeMode || page === 0 || page === PAGES.length - 1;
+  $("next").disabled = blocked();
+  $("model").hidden = codeMode || ["welcome", "server", "ready"].includes(PAGES[page]);
   renderFooter();
   if (PAGES[page] === "ready") renderProgress();
   if (PAGES[page] === "code") renderCode();
 }
 
+/// Continue waits for a folder, and for a server's URL when the model runs on one.
+function blocked() {
+  if (PAGES[page] === "server") return !embedder.ready();
+  return PAGES[page] === "folders" && !selection.folders().length;
+}
+
 function renderFooter() {
-  $("next").disabled = page === 1 && !selection.folders().length;
+  $("next").disabled = blocked();
   let summary = "";
   if (PAGES[page] === "folders") {
     if (!selection.folders().length) summary = "Choose at least one folder";
@@ -399,6 +407,18 @@ function renderFooter() {
 
 $("next").addEventListener("click", async () => {
   const name = PAGES[page];
+  // Saved as the choice is left: this computer's model on the first step, a server on its own.
+  if ((name === "welcome" && !embedder?.choosingServer() || name === "server") && embedder?.changed()) {
+    // A server: the download stops, and the model is ready at once. Back to this computer: the download starts again.
+    $("next").disabled = true;
+    try {
+      await embedder.save();
+    } catch {
+      $("summary").textContent = embedder.problem();
+      $("next").disabled = false;
+      return;
+    }
+  }
   if (name === "folders") {
     $("next").disabled = true;
     try {
@@ -589,7 +609,7 @@ function showModel(model) {
   const lines = {
     checking: "Checking the model…",
     waiting: "Waiting for the network to download the model",
-    ready: "Model ready",
+    ready: embedder?.saved() ? "The embedding server is ready" : "Model ready",
     failed: `The model couldn't download: ${model.message || "unknown error"}`,
   };
   let text = lines[model.state] || "";
@@ -688,6 +708,18 @@ async function start() {
     tauri.event.listen("model", ({ payload }) => showModel(payload));
     showKeys(info.hotkey);
     showShortcut(info.shortcut);
+  }
+  if (firstTime && !codeMode) {
+    $("model-choice").hidden = false;
+    embedder = embedderForm($("model-choice"), $("server-fields"), { changed: () => {
+      const server = embedder.choosingServer();
+      $("privacy-here").hidden = server;
+      $("privacy-server").hidden = !server;
+      PAGES = PAGES.filter((name) => name !== "server");
+      if (server) PAGES.splice(1, 0, "server");
+      renderFooter();
+    } });
+    await embedder.load();
   }
   if (!firstTime) page = 1;   // Choose Folders…: the folders, with Save
   const asked = PAGES.indexOf(new URLSearchParams(location.search).get("page"));   // dev snapshots: ?page=folders

@@ -21,8 +21,18 @@
         <li><span class="tile"><svg viewBox="0 0 24 24"><path d="M3 12 H5 M7 8 V16 M10 5 V19 M13 9 V15 M16 6 V18 M19 10 V14 M21 12 H22"/></svg></span><div><b>Moments inside audio and video</b>
           <span>“where they talk about sleep”, “the part with the drums”</span></div></li>
       </ul>
-      <p class="privacy">Everything is indexed and searched on this computer. DigUp downloads its AI model (865 MB)
+      <p class="privacy" id="privacy-here">Everything is indexed and searched on this computer. DigUp downloads its AI model (865 MB)
         once; after that it works offline, and nothing you index ever leaves your computer.</p>
+      <p class="privacy" id="privacy-server" hidden>Everything is indexed and searched on this computer, but what DigUp
+        reads goes to your embedding server to be understood. You set it up next; nothing is downloaded.</p>
+      <div class="model-choice embedder" id="model-choice" hidden></div>
+    </section>
+
+    <section class="page" id="server" hidden>
+      <h2>Your embedding server</h2>
+      <p class="subtitle">DigUp sends the text, pictures and sound it reads to this server, and the server gives back what
+        DigUp needs to search them by meaning. Nothing is downloaded to this computer.</p>
+      <div class="embedder" id="server-fields"></div>
     </section>
 
     <section class="page" id="folders" hidden>
@@ -89,6 +99,7 @@
     </span>
   </footer>
   <script src="shortcut.js"></script>
+  <script src="embedder.js"></script>
   <script src="setup.js"></script>
 </body>
 </html>

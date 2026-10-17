@@ -2,7 +2,8 @@
 // login, centering the search panel where the desktop places windows itself (it costs memory, so it's a choice), where
 // the shortcut lives, and updates. Folders: how indexing goes (with Pause), each folder searched and how far along it is, the
 // folders and file types skipped, and the set hours. Code: code search's folders (added in setup's folder list for code),
-// the editor its results open in, turning it off. Storage: the model, the index, privacy.
+// the editor its results open in, turning it off. Model: where it runs, this computer (its download) or an embedding
+// server. Storage: the index, privacy.
 "use strict";
 
 const tauri = window.__TAURI__;
@@ -383,6 +384,18 @@ $("code-off-go").onclick = async () => {
   await refresh();
 };
 
+// MARK: Model
+
+// Where the model runs: this computer (its download and where it is) or an embedding server (embedder.js).
+const embedder = embedderForm($("embedder"), $("embedder"), { save: true, changed: renderModel });
+
+function renderModel() {
+  const server = embedder.saved();
+  $("model-facts").hidden = Boolean(server) || embedder.choosingServer();
+  $("privacy-server").hidden = !server;
+  $("privacy-here").hidden = Boolean(server);
+}
+
 // MARK: Storage
 
 function renderStorage() {
@@ -499,7 +512,7 @@ tauri.event.listen("state", ({ payload }) => {
 });
 
 async function start() {
-  await refresh();
+  await Promise.all([refresh(), embedder.load()]);
   // Debug runs (--debug-settings): the page is up.
   if (info.debug) {
     invoke("debug_report", { report: { settings: true, hotkey: info.hotkey, openAtLogin: info.openAtLogin,

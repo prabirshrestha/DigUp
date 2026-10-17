@@ -293,7 +293,8 @@ impl IndexService {
 }
 
 /// `digup download-model`: the model files, from the Hugging Face cache or downloaded with resume, each checked. One at
-/// a time; `run` again while it runs does nothing. Its events ("progress", "done", "error"…) go to `on_event`.
+/// a time; `run` again while it runs does nothing. Its events ("progress", "done", "error"…) go to `on_event`, until
+/// it's stopped here.
 pub struct ModelDownload {
     running: Arc<Mutex<Option<(Child, u64)>>>,
     on_event: EventSink,
@@ -317,21 +318,22 @@ impl ModelDownload {
         let (on_event, slot) = (self.on_event.clone(), self.running.clone());
         std::thread::spawn(move || {
             let mut ended = false;
+            // One stopped here (`stop`) says nothing more: what it still had written is out of date.
+            let ours = || slot.lock().unwrap().as_ref().is_some_and(|(_, started)| *started == number);
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 if let Ok(event) = serde_json::from_str::<Value>(&line) {
                     ended |= event["event"] == "done" || event["event"] == "error";
-                    on_event(event);
+                    if ours() {
+                        on_event(event);
+                    }
                 }
             }
-            let mut slot = slot.lock().unwrap();
-            if slot.as_ref().is_some_and(|(_, started)| *started == number) {
-                if let Some((mut child, _)) = slot.take() {
-                    reap(&mut child);
-                }
+            let stopped = !ours();
+            if let Some((mut child, _)) = slot.lock().unwrap().take_if(|(_, started)| *started == number) {
+                reap(&mut child);
             }
-            drop(slot);
-            if !ended {
+            if !ended && !stopped {
                 on_event(json!({"event": "error", "message": "the download stopped"}));
             }
         });

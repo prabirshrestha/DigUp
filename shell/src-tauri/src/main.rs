@@ -8,6 +8,7 @@
 mod clipboard;
 mod code;
 mod editors;
+mod embedder;
 mod helper;
 mod hotkey;
 mod hours;
@@ -627,7 +628,7 @@ fn main() {
             app_state, open_window, open_settings, choose_folders, index_now, quit_app, close_window, pause_indexing,
             remove_folder, set_skipped, set_skip_types, set_index_hours, code_setup_info, set_code_folders, choose_code_folders,
             remove_code_folder, turn_off_code, set_code_editor, window_resized, copy_file, drag_out, set_hotkey, hold_hotkey,
-            set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses
+            set_tray_click, check_for_updates, offer_update, set_update_checks, open_licenses, embedder, test_embedder, save_embedder
         ])
         .build(tauri::generate_context!())
         .expect("DigUp couldn't start");
@@ -784,13 +785,7 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
             changed(&counted);
         }
     });
-    let mut download = vec!["download-model".to_string()];
-    if let Some(models) = &shell.options.models {
-        download.extend(["--to".to_string(), models.display().to_string()]);
-    }
-    if let Err(error) = shell.model.run(&shell.launch(download, "model.log")) {
-        model_event(&handle, json!({"event": "error", "message": error}));
-    }
+    fetch_model(&handle);
     if !shell.folders().is_empty() || !shell.code_folders().is_empty() {
         watch_folders(&handle);
     } else {
@@ -820,6 +815,19 @@ fn setup(app: &mut tauri::App, options: Options) -> Result<(), Box<dyn std::erro
         }
     }
     Ok(())
+}
+
+/// `digup download-model`: the model files, checked, and fetched if they're missing; with an embedding server set it's
+/// done at once. Either way "done" makes the model ready, and indexing follows (`model_event`).
+fn fetch_model(app: &AppHandle) {
+    let shell = app.state::<Arc<Shell>>();
+    let mut download = vec!["download-model".to_string()];
+    if let Some(models) = &shell.options.models {
+        download.extend(["--to".to_string(), models.display().to_string()]);
+    }
+    if let Err(error) = shell.model.run(&shell.launch(download, "model.log")) {
+        model_event(app, json!({"event": "error", "message": error}));
+    }
 }
 
 /// After setup or a change of folders: the search service, the watcher and indexing follow the new folders.
@@ -1281,6 +1289,45 @@ fn set_hotkey(app: AppHandle, shell: State<'_, Arc<Shell>>, hotkey: String) -> R
         settings.save(&shell.settings_path).map_err(|error| format!("can't save the settings: {error}"))?;
     }
     Ok(shell.hotkey_text())
+}
+
+/// Settings → Model and setup: the embedding server saved, or null for the model on this computer.
+#[tauri::command]
+async fn embedder(shell: State<'_, Arc<Shell>>) -> Result<Option<embedder::Server>, String> {
+    let helper = shell.options.helper.clone();
+    tauri::async_runtime::spawn_blocking(move || embedder::saved(&helper)).await.map_err(|error| error.to_string())?
+}
+
+/// Test: whether the server gives vectors for text, a picture and a sound.
+#[tauri::command]
+async fn test_embedder(shell: State<'_, Arc<Shell>>, server: embedder::Server) -> Result<embedder::Outcome, String> {
+    let helper = shell.options.helper.clone();
+    tauri::async_runtime::spawn_blocking(move || embedder::test(&helper, &server)).await.map_err(|error| error.to_string())?
+}
+
+/// Save: the helpers start over with the new embedder (they read it as they start). The model is checked again as at
+/// launch: ready at once for a server (a download under way stops), fetched if it's missing for this computer's; indexing
+/// follows once it's ready.
+#[tauri::command]
+async fn save_embedder(app: AppHandle, shell: State<'_, Arc<Shell>>, server: Option<embedder::Server>) -> Result<(), String> {
+    let shell = shell.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        embedder::save(&shell.options.helper, server.as_ref())?;
+        shell.model.stop();
+        shell.index.stop();
+        shell.search.stop();
+        *shell.model_state.lock().unwrap() = json!({"state": "checking"});
+        let _ = app.emit("model", json!({"state": "checking"}));
+        changed(&app);
+        fetch_model(&app);
+        // The search service starts again now, so the next search doesn't wait for it.
+        tauri::async_runtime::spawn(async move {
+            let _ = shell.search.ask(json!({"op": "status"})).await;
+        });
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Settings → Folders: stops searching a folder (and what's skipped inside it); its files leave the index.

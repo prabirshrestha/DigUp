@@ -11,6 +11,7 @@
     <button role="tab" data-tab="general">General</button>
     <button role="tab" data-tab="folders">Folders</button>
     <button role="tab" data-tab="code">Code</button>
+    <button role="tab" data-tab="model">Model</button>
     <button role="tab" data-tab="storage">Storage</button>
   </nav>
   <main class="settings">
@@ -129,20 +130,27 @@
       </div>
     </section>
 
-    <section class="tab" id="storage" role="tabpanel" hidden>
-      <h3>Model</h3>
-      <div class="card facts">
+    <section class="tab" id="model" role="tabpanel" hidden>
+      <h3>Run the model</h3>
+      <div class="embedder" id="embedder"></div>
+      <div class="card facts" id="model-facts">
         <div class="fact"><span>EmbeddingGemma 2</span><span>Google · Apache 2.0 · 865 MB</span></div>
         <div class="fact"><span>Status</span><span id="model-status"></span></div>
         <div class="fact"><span>Location</span><button class="path-button" id="model-path"></button></div>
       </div>
+    </section>
+
+    <section class="tab" id="storage" role="tabpanel" hidden>
       <h3>Index</h3>
       <div class="card facts">
         <div class="fact"><span>Size on disk</span><span id="index-size"></span></div>
         <div class="fact"><span>Location</span><button class="path-button" id="index-path"></button></div>
       </div>
       <h3>Privacy</h3>
-      <p class="privacy-text">DigUp reads the folders you choose and keeps what it learns in its index, on this
+      <p class="privacy-text" id="privacy-server" hidden>DigUp reads the folders you choose and keeps what it learns in
+        its index, on this computer. Your files' text, pictures and sound go to the embedding server (Model) to be
+        understood. DigUp also checks for updates (General), which sends nothing about your files.</p>
+      <p class="privacy-text" id="privacy-here">DigUp reads the folders you choose and keeps what it learns in its index, on this
         computer. It goes online only to download its model, once, and to check for updates (General), which sends nothing
         about your files.</p>
       <p class="note"><span id="version"></span> <button class="link inline" id="licenses" hidden>Licenses</button></p>
@@ -151,6 +159,7 @@
     <p class="note problem" id="problem" hidden></p>
   </main>
   <script src="shortcut.js"></script>
+  <script src="embedder.js"></script>
   <script src="settings.js"></script>
 </body>
 </html>
